@@ -1,0 +1,18 @@
+[
+    {
+        "caption": "Gemini: Chat / Ask",
+        "command": "gemini_chat"
+    },
+    {
+        "caption": "Gemini: Inline Edit / Refactor",
+        "command": "gemini_inline"
+    },
+    {
+        "caption": "Gemini: Accept Diff",
+        "command": "gemini_accept_diff"
+    },
+    {
+        "caption": "Gemini: Reject Diff",
+        "command": "gemini_reject_diff"
+    }
+]

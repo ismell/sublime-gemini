@@ -1,0 +1,51 @@
+[
+    {
+        "id": "tools",
+        "children":
+        [
+            {
+                "caption": "Gemini",
+                "id": "gemini",
+                "children":
+                [
+                    {
+                        "command": "gemini_chat",
+                        "caption": "Ask Gemini..."
+                    }
+                ]
+            }
+        ]
+    },
+    {
+        "caption": "Preferences",
+        "mnemonic": "n",
+        "id": "preferences",
+        "children":
+        [
+            {
+                "caption": "Package Settings",
+                "mnemonic": "P",
+                "id": "package-settings",
+                "children":
+                [
+                    {
+                        "caption": "Gemini",
+                        "children":
+                        [
+                            {
+                                "command": "open_file",
+                                "args": {"file": "${packages}/Gemini/Gemini.sublime-settings"},
+                                "caption": "Settings"
+                            },
+                            {
+                                "command": "open_file",
+                                "args": {"file": "${packages}/Gemini/Gemini.sublime-settings", "default": "{\n\t\"gemini_path\": \"gemini\"\n}"},
+                                "caption": "Settings – Default"
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }
+]

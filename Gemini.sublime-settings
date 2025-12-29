@@ -1,0 +1,5 @@
+{
+    // Path to the gemini executable. 
+    // If it's in your PATH, "gemini" is sufficient.
+    "gemini_path": "/usr/local/bin/gemini"
+}

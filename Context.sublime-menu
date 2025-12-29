@@ -1,0 +1,40 @@
+[
+    { "caption": "-", "id": "gemini_sep" },
+    {
+        "caption": "Gemini",
+        "children":
+        [
+            { "caption": "Chat / Ask...", "command": "gemini_chat" },
+            { "caption": "-" },
+            {
+                "caption": "Explain Code",
+                "command": "gemini_chat", "args": {"instruction": "Explain this code"}
+            },
+            {
+                "caption": "Suggest Improvements",
+                "command": "gemini_chat", "args": {"instruction": "Suggest improvements for this code"}
+            },
+            {
+                "caption": "Find Potential Bugs",
+                "command": "gemini_chat", "args": {"instruction": "Find potential bugs in this code"}
+            },
+            { "caption": "-" },
+            {
+                "caption": "Inline Edit / Refactor...",
+                "command": "gemini_inline"
+            },
+            {
+                "caption": "Add Comments / Docstrings",
+                "command": "gemini_inline", "args": {"instruction": "Add helpful comments and docstrings to this code"}
+            },
+            {
+                "caption": "Refactor / Clean Up",
+                "command": "gemini_inline", "args": {"instruction": "Refactor this code to be cleaner and more idiomatic"}
+            },
+            {
+                "caption": "Write Unit Test",
+                "command": "gemini_inline", "args": {"instruction": "Write a unit test for this code"}
+            }
+        ]
+    }
+]

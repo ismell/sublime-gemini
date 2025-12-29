@@ -1,0 +1,10 @@
+[
+    {
+        "keys": ["ctrl+shift+g"],
+        "command": "gemini_chat"
+    },
+    {
+        "keys": ["ctrl+shift+i"],
+        "command": "gemini_insert_context"
+    }
+]
