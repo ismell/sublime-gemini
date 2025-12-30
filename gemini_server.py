@@ -1,12 +1,13 @@
-import http.server
-import socketserver
-import json
-import sublime
-import uuid
-import queue
 import difflib
-import os
 import html
+import http.server
+import json
+import os
+import queue
+import socketserver
+import uuid
+
+import sublime
 
 
 class MCPServerHandler(http.server.BaseHTTPRequestHandler):
@@ -92,7 +93,7 @@ class MCPServerHandler(http.server.BaseHTTPRequestHandler):
             self.log_message("RPC Request: %s", request.get("method"))
 
             # Extract session_id from query params if present
-            from urllib.parse import urlparse, parse_qs
+            from urllib.parse import parse_qs, urlparse
 
             query = parse_qs(urlparse(self.path).query)
             session_id = query.get("session_id", [None])[0]
@@ -301,14 +302,14 @@ class GeminiDelegate:
             abs_path = os.path.abspath(file_path)
             best_match = None
             max_len = 0
-            
+
             for w in sublime.windows():
                 for folder in w.folders():
                     if abs_path.startswith(os.path.abspath(folder)):
                         if len(folder) > max_len:
                             max_len = len(folder)
                             best_match = w
-            
+
             if best_match:
                 return best_match
 
@@ -337,7 +338,7 @@ class GeminiDelegate:
             for tag, i1, i2, j1, j2 in matcher.get_opcodes():
                 if tag == "equal":
                     continue
-                
+
                 start_pt = view.text_point(j1, 0)
                 end_pt = view.text_point(j2, 0)
 
@@ -354,7 +355,7 @@ class GeminiDelegate:
                 if tag in ("delete", "replace"):
                     deleted_text = "".join(original_lines[i1:i2])
                     safe_text = html.escape(deleted_text)
-                    
+
                     phantom_html = """
                     <body id="gemini-diff-deleted">
                         <style>
@@ -362,19 +363,21 @@ class GeminiDelegate:
                                 background-color: #4b1818;
                                 color: #cccccc;
                                 margin: 0;
-                                padding: 1px 4px; 
+                                padding: 1px 4px;
                                 border: 1px solid #6b2828;
                             }
                         </style>
                         <div style="font-family: monospace; white-space: pre;">%s</div>
                     </body>
-                    """ % (safe_text)
-                    
+                    """ % (
+                        safe_text
+                    )
+
                     view.add_phantom(
                         "gemini_diff_deleted",
                         sublime.Region(start_pt, start_pt),
                         phantom_html,
-                        sublime.LAYOUT_BLOCK
+                        sublime.LAYOUT_BLOCK,
                     )
 
             if changed_regions:
@@ -393,7 +396,9 @@ class GeminiDelegate:
     def _get_diff_toolbar_html(self, terminal_panel=None, warning=False):
         terminal_btn = ""
         if terminal_panel:
-            terminal_btn = '<a href="terminal:{}" style="text-decoration: none; padding: 4px 10px; border-radius: 4px; color: #aaaaaa; background-color: #2d2d2d; font-size: 0.8rem;">Terminal</a>'.format(terminal_panel)
+            terminal_btn = '<a href="terminal:{}" style="text-decoration: none; padding: 4px 10px; border-radius: 4px; color: #aaaaaa; background-color: #2d2d2d; font-size: 0.8rem;">Terminal</a>'.format(
+                terminal_panel
+            )
 
         warning_html = ""
         if warning:
@@ -416,22 +421,24 @@ class GeminiDelegate:
                 <a href="reject" style="text-decoration: none; padding: 6px 14px; border-radius: 4px; color: #ffffff; background-color: #da3633; font-size: 0.8rem; margin-left: 8px;">\u2715 Reject</a>
             </div>
         </body>
-        """.format(warning_html, terminal_btn)
+        """.format(
+            warning_html, terminal_btn
+        )
 
     def _show_diff_panel(self, window, file_path, previous_panel=None, warning=False):
         panel = window.create_output_panel("GeminiDiff")
         panel.settings().set("gutter", False)
         panel.settings().set("line_numbers", False)
-        
+
         html = self._get_diff_toolbar_html(previous_panel, warning)
-        
+
         panel.erase_phantoms("gemini_diff_panel")
         panel.add_phantom(
             "gemini_diff_panel",
             sublime.Region(0, 0),
             html,
             sublime.LAYOUT_INLINE,
-            lambda href: self.handle_diff_action(file_path, href)
+            lambda href: self.handle_diff_action(file_path, href),
         )
         window.run_command("show_panel", {"panel": "output.GeminiDiff"})
 
@@ -519,7 +526,7 @@ class GeminiDelegate:
                 "msg": None,
                 "result": {"status": "rejected", "error": "View not found during acceptance"},
             }
-        
+
         if view.window():
             view.window().run_command("hide_panel", {"panel": "output.GeminiDiff"})
             if previous_panel:
@@ -534,7 +541,7 @@ class GeminiDelegate:
         view.settings().erase("gemini_is_diff")
         view.settings().erase("gemini_diff_explanation")
         view.set_reference_document(final_content)
-        
+
         view.run_command("save")
         sublime.status_message("Gemini: Changes accepted and saved.")
 

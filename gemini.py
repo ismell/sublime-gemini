@@ -1,12 +1,13 @@
+import json
+import os
+import subprocess
+import tempfile
+import threading
+import time
+import uuid
+
 import sublime
 import sublime_plugin
-import threading
-import os
-import json
-import uuid
-import tempfile
-import time
-import subprocess
 
 try:
     from . import gemini_server

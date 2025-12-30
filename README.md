@@ -7,7 +7,7 @@ Sublime Text integration for the [Gemini CLI](https://github.com/google-gemini/g
 - **Integrated Terminal Chat**: Runs the full Gemini CLI TUI inside Sublime (configurable as a panel, tab, or split).
 - **Context Aware**: Automatically shares your open files and project structure with the AI (respecting your project roots).
 - **Inline Refactoring**: Right-click code to Explain, Refactor, or Add Comments with a live diff preview.
-- **Enhanced Diff View**: 
+- **Enhanced Diff View**:
   - **Highlighting**: Proposed changes are highlighted in the buffer.
   - **Smart Navigation**: Automatically scrolls to the first change.
   - **Dual Controls**: "Accept/Reject" phantoms at both the top and bottom of changes for easy access in long files.
