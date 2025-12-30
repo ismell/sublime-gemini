@@ -18,5 +18,9 @@
     {
         "caption": "Gemini: Stop Generation",
         "command": "gemini_stop"
+    },
+    {
+        "caption": "Gemini: Generate Commit Message",
+        "command": "gemini_generate_commit_message"
     }
 ]

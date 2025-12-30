@@ -11,6 +11,18 @@
                     {
                         "command": "gemini_chat",
                         "caption": "Ask Gemini..."
+                    },
+                    {
+                        "command": "gemini_stop",
+                        "caption": "Stop Generation"
+                    },
+                    {
+                        "caption": "-",
+                        "id": "commit_sep"
+                    },
+                    {
+                        "command": "gemini_generate_commit_message",
+                        "caption": "Generate Commit Message"
                     }
                 ]
             }

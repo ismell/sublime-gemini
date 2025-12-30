@@ -5,9 +5,9 @@ target-version = ['py312']
 exclude = '''
 /(
   | \.git
-    | \.venv
-    )/
-    '''
+  | \.venv
+)/
+'''
 
 [tool.isort]
 profile = "black"

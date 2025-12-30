@@ -6,6 +6,7 @@ import json
 import uuid
 import tempfile
 import time
+import subprocess
 
 try:
     from . import gemini_server
@@ -123,13 +124,28 @@ def push_context_update(window):
     roots = get_project_roots(window)
     open_files = []
 
+    active_view = window.active_view()
+    # If the active view is a Terminus view, try to find the last active code view
+    # (This is an approximation; ideally we'd track Z-order)
+    if active_view and active_view.settings().get("terminus_view.tag"):
+        active_view = None
+        # Fallback: find the first non-terminus view
+        for v in window.views():
+            if not v.settings().get("terminus_view.tag"):
+                active_view = v
+                break
+
     for view in window.views():
         fname = view.file_name()
         if not fname or not os.path.exists(fname):
             continue
 
+        # Ignore Terminus views in the file list (though they usually don't have file_names)
+        if view.settings().get("terminus_view.tag"):
+            continue
+
         # Check if this view is the currently active one
-        is_active = (view.id() == window.active_view().id()) if window.active_view() else False
+        is_active = active_view and view.id() == active_view.id()
 
         # Check if file is within any of the project roots
         is_in_project = False
@@ -288,15 +304,61 @@ class GeminiChatCommand(sublime_plugin.WindowCommand):
         Runs the Gemini CLI in a Terminus view. If an instruction is provided,
         it sends it to the terminal.
         """
-        terminus_view = self.ensure_terminus_open(location)
+        # Capture context before we possibly switch focus to the terminal
+        source_view = self.window.active_view()
+        context_text = ""
+        if source_view and instruction:
+            # Ensure we don't grab text from the terminal itself
+            if not source_view.settings().get("terminus_view.tag"):
+                target = get_target_region(source_view)
+                if target:
+                    context_text = source_view.substr(target)
+
+        # Append context to instruction if available
+        if instruction and context_text:
+            instruction += "\n\n```\n" + context_text + "\n```"
+
+        # Snapshot active sessions before launch to detect new connection
+        initial_sessions = set(server.sessions.keys()) if server else set()
+
+        terminus_view, is_new = self.ensure_terminus_open(location)
         if not terminus_view:
             return
 
         self.window.focus_view(terminus_view)
         if instruction:
-            self.window.run_command(
-                "terminus_send_string", {"string": instruction + "\n", "tag": "gemini_cli"}
+            if is_new:
+                # Wait for the new CLI instance to connect to the MCP server
+                self.wait_for_new_session_and_send(instruction, initial_sessions)
+            else:
+                self.send_instruction(instruction)
+
+    def wait_for_new_session_and_send(self, instruction, initial_sessions, attempt=0):
+        if not server:
+            self.send_instruction(instruction)
+            return
+
+        current_sessions = set(server.sessions.keys())
+        # Check if a new session has appeared
+        if len(current_sessions) > len(initial_sessions) and (current_sessions - initial_sessions):
+            # New session detected! Give it a moment to settle (REPL initialization)
+            sublime.set_timeout(lambda: self.send_instruction(instruction), 1000)
+        elif attempt < 40:  # Poll for ~20 seconds (40 * 500ms)
+            sublime.set_timeout(
+                lambda: self.wait_for_new_session_and_send(
+                    instruction, initial_sessions, attempt + 1
+                ),
+                500,
             )
+        else:
+            # Timeout waiting for connection, try sending anyway
+            print("[Gemini] Timeout waiting for MCP connection, sending instruction blindly.")
+            self.send_instruction(instruction)
+
+    def send_instruction(self, instruction):
+        self.window.run_command(
+            "terminus_send_string", {"string": instruction + "\n", "tag": "gemini_cli"}
+        )
 
     def description(self, instruction=None, location=None):
         return "Gemini Chat: {}".format(instruction) if instruction else "Gemini Chat"
@@ -414,18 +476,19 @@ class GeminiChatCommand(sublime_plugin.WindowCommand):
                 self.window.run_command("show_panel", {"panel": "output." + panel_name})
             else:
                 self.window.focus_view(target_view)
+            return target_view, False
         else:
             if not sublime.find_resources("Terminus.sublime-settings"):
                 sublime.error_message("Install Terminus.")
-                return None
+                return None, False
 
             self._prepare_view_location(location)
             target_view = self._create_terminus_view(location, panel_name, title, tag)
 
-        if target_view and current_port:
-            target_view.settings().set("gemini_server_port", current_port)
+            if target_view and current_port:
+                target_view.settings().set("gemini_server_port", current_port)
 
-        return target_view
+            return target_view, True
 
 
 class GeminiStopCommand(sublime_plugin.WindowCommand):
@@ -510,6 +573,48 @@ class GeminiInsertContextCommand(sublime_plugin.WindowCommand):
         self.window.run_command(
             "terminus_send_string", {"string": " " + context_str + " ", "tag": tag}
         )
+
+
+class GeminiGenerateCommitMessageCommand(sublime_plugin.WindowCommand):
+    def run(self):
+        roots = get_project_roots(self.window)
+        if not roots:
+            sublime.status_message("Gemini: No project root found.")
+            return
+
+        # Use the first root for now
+        cwd = roots[0]
+
+        try:
+            # Try staged changes first
+            diff = subprocess.check_output(
+                ["git", "diff", "--staged"], cwd=cwd, stderr=subprocess.STDOUT
+            ).decode("utf-8")
+
+            if not diff.strip():
+                # Fallback to unstaged changes
+                diff = subprocess.check_output(
+                    ["git", "diff"], cwd=cwd, stderr=subprocess.STDOUT
+                ).decode("utf-8")
+
+            if not diff.strip():
+                sublime.status_message("Gemini: No changes detected (staged or unstaged).")
+                return
+
+            # Limit diff size to avoid context overflow (approx 800 lines)
+            lines = diff.splitlines()
+            if len(lines) > 800:
+                diff = "\n".join(lines[:800]) + "\n... (truncated)"
+
+            instruction = "Generate a concise and descriptive git commit message for the following changes:\n\n```diff\n{}\n```".format(
+                diff
+            )
+            self.window.run_command("gemini_chat", {"instruction": instruction})
+
+        except subprocess.CalledProcessError:
+            sublime.status_message("Gemini: Failed to run git diff. Is this a git repository?")
+        except Exception as e:
+            sublime.status_message("Gemini: Error generating commit message: {}".format(str(e)))
 
 
 class GeminiInlineCommand(sublime_plugin.TextCommand):
@@ -598,7 +703,7 @@ def write_discovery_file(window):
 
     # Write discovery files for both parent (plugin_host) and grandparent (Sublime Text)
     # to ensure gemini-cli can find it regardless of how it traverses the tree.
-    pids = [os.getpid(), os.getppid()]
+    pids = {os.getpid(), os.getppid()}
 
     # Try to find the grandparent PID as well (Sublime Text main process)
     try:
@@ -609,7 +714,7 @@ def write_discovery_file(window):
             subprocess.check_output(["ps", "-o", "ppid=", "-p", str(ppid)]).decode().strip()
         )
         if grandparent and grandparent.isdigit():
-            pids.append(int(grandparent))
+            pids.add(int(grandparent))
     except Exception:
         pass
 
@@ -620,7 +725,7 @@ def write_discovery_file(window):
         except Exception:
             pass
 
-    for pid in set(pids):
+    for pid in pids:
         discovery_file_path = os.path.join(
             discovery_dir, "gemini-ide-server-{}-{}.json".format(pid, port)
         )
@@ -639,7 +744,7 @@ def write_discovery_file(window):
 
 def plugin_loaded():
     # Small delay to ensure Sublime is ready
-    sublime.set_timeout(lambda: threading.Thread(target=start_server_async).start(), 500)
+    sublime.set_timeout(lambda: threading.Thread(target=start_server_async).start(), 1000)
 
 
 def plugin_unloaded():
@@ -656,6 +761,10 @@ def plugin_unloaded():
 
 
 class GeminiEventListener(sublime_plugin.EventListener):
+    """
+    Listens for Sublime Text events to update Gemini's context and handle diff views.
+    """
+
     def on_activated(self, view):
         if view.window():
             write_discovery_file(view.window())
@@ -707,6 +816,68 @@ class GeminiRejectDiffCommand(sublime_plugin.TextCommand):
             server.delegate.resolve_diff(diff_file, False)
         else:
             self.view.close()
+
+    def is_visible(self):
+        return self.view.settings().get("gemini_is_diff", False)
+
+
+class GeminiNextChangeCommand(sublime_plugin.TextCommand):
+    def run(self, edit):
+        regions = self.view.get_regions("gemini_changes")
+        if not regions:
+            return
+
+        sel = self.view.sel()
+        if not sel:
+            return
+
+        current_pt = sel[0].begin()
+        next_region = None
+
+        # Find first region that starts after current point
+        for r in regions:
+            if r.begin() > current_pt:
+                next_region = r
+                break
+
+        # Wrap around
+        if not next_region:
+            next_region = regions[0]
+
+        self.view.show_at_center(next_region)
+        self.view.sel().clear()
+        self.view.sel().add(next_region.begin())
+
+    def is_visible(self):
+        return self.view.settings().get("gemini_is_diff", False)
+
+
+class GeminiPrevChangeCommand(sublime_plugin.TextCommand):
+    def run(self, edit):
+        regions = self.view.get_regions("gemini_changes")
+        if not regions:
+            return
+
+        sel = self.view.sel()
+        if not sel:
+            return
+
+        current_pt = sel[0].begin()
+        prev_region = None
+
+        # Find last region that starts before current point
+        for r in reversed(regions):
+            if r.begin() < current_pt:
+                prev_region = r
+                break
+
+        # Wrap around
+        if not prev_region:
+            prev_region = regions[-1]
+
+        self.view.show_at_center(prev_region)
+        self.view.sel().clear()
+        self.view.sel().add(prev_region.begin())
 
     def is_visible(self):
         return self.view.settings().get("gemini_is_diff", False)

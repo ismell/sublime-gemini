@@ -5,6 +5,8 @@ import sublime
 import uuid
 import queue
 import difflib
+import os
+import html
 
 
 class MCPServerHandler(http.server.BaseHTTPRequestHandler):
@@ -287,6 +289,32 @@ class GeminiDelegate:
             "result": {"content": [{"type": "text", "text": "Diff view opened"}]},
         }
 
+    def _get_target_window(self, file_path=None):
+        # 1. If file_path is provided, try to find a window that has this file open
+        if file_path:
+            for w in sublime.windows():
+                if w.find_open_file(file_path):
+                    return w
+
+        # 2. Try to find a window that contains the file in its project folders
+        if file_path:
+            abs_path = os.path.abspath(file_path)
+            best_match = None
+            max_len = 0
+            
+            for w in sublime.windows():
+                for folder in w.folders():
+                    if abs_path.startswith(os.path.abspath(folder)):
+                        if len(folder) > max_len:
+                            max_len = len(folder)
+                            best_match = w
+            
+            if best_match:
+                return best_match
+
+        # 3. Fallback to active window
+        return sublime.active_window()
+
     def _prepare_diff_view(self, file_path):
         window = sublime.active_window()
         view = window.find_open_file(file_path)
@@ -301,21 +329,58 @@ class GeminiDelegate:
             matcher = difflib.SequenceMatcher(None, original_lines, new_lines)
 
             changed_regions = []
+            view.erase_phantoms("gemini_diff_deleted")
+
             first_change_pt = None
             last_change_pt = None
 
             for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-                if tag != "equal":
-                    start_pt = view.text_point(j1, 0)
-                    end_pt = view.text_point(j2, 0)
-                    if first_change_pt is None:
-                        first_change_pt = start_pt
-                    last_change_pt = end_pt
+                if tag == "equal":
+                    continue
+                
+                start_pt = view.text_point(j1, 0)
+                end_pt = view.text_point(j2, 0)
+
+                if first_change_pt is None:
+                    first_change_pt = start_pt
+                last_change_pt = end_pt
+
+                if tag in ("insert", "replace"):
                     changed_regions.append(sublime.Region(start_pt, end_pt))
+                elif tag == "delete":
+                    # Add a zero-width region for navigation to deleted blocks
+                    changed_regions.append(sublime.Region(start_pt, start_pt))
+
+                if tag in ("delete", "replace"):
+                    deleted_text = "".join(original_lines[i1:i2])
+                    safe_text = html.escape(deleted_text)
+                    
+                    phantom_html = """
+                    <body id="gemini-diff-deleted">
+                        <style>
+                            body {
+                                background-color: #4b1818;
+                                color: #cccccc;
+                                margin: 0;
+                                padding: 1px 4px; 
+                                border: 1px solid #6b2828;
+                            }
+                        </style>
+                        <div style="font-family: monospace; white-space: pre;">%s</div>
+                    </body>
+                    """ % (safe_text)
+                    
+                    view.add_phantom(
+                        "gemini_diff_deleted",
+                        sublime.Region(start_pt, start_pt),
+                        phantom_html,
+                        sublime.LAYOUT_BLOCK
+                    )
 
             if changed_regions:
+                # 'markup.inserted' is a standard scope for green/inserted text
                 view.add_regions(
-                    "gemini_changes", changed_regions, "region.yellowish", "", sublime.DRAW_NO_FILL
+                    "gemini_changes", changed_regions, "markup.inserted", "", sublime.DRAW_NO_FILL
                 )
 
             if first_change_pt is not None:
@@ -325,94 +390,153 @@ class GeminiDelegate:
             print("[Gemini] Error calculating diff highlights:", e)
             return None
 
-    def _add_diff_phantoms(self, view, file_path, explanation, last_change_pt):
-        import html as html_module
+    def _get_diff_toolbar_html(self, terminal_panel=None, warning=False):
+        terminal_btn = ""
+        if terminal_panel:
+            terminal_btn = '<a href="terminal:{}" style="text-decoration: none; padding: 4px 10px; border-radius: 4px; color: #aaaaaa; background-color: #2d2d2d; font-size: 0.8rem;">Terminal</a>'.format(terminal_panel)
 
-        safe_explanation = html_module.escape(explanation)
-        html = """
-        <body id="gemini-diff">
-            <style>
-                body {{ background-color: #1e1e1e; padding: 12px; border-bottom: 1px solid #333; }}
-                .container {{ display: flex; flex-direction: column; gap: 8px; }}
-                .header {{ display: block; margin-bottom: 8px; }}
-                .label {{ font-weight: bold; color: #a9b7c6; font-size: 1.1em; }}
-                .explanation {{ color: #cccccc; margin-bottom: 12px; line-height: 1.4; display: block; }}
-                .actions {{ margin-top: 5px; }}
-                .btn {{ text-decoration: none; display: inline-block; padding: 6px 14px; border-radius: 4px; color: white; margin-right: 10px; font-size: 0.9em; font-family: system-ui; }}
-                .btn.accept {{ background-color: #2da44e; }}
-                .btn.reject {{ background-color: #cf222e; }}
-            </style>
-            <div class="container">
-                <div class="header">
-                    <span class="label">Gemini Suggestion</span>
-                </div>
-                <div class="explanation">{explanation}</div>
-                <div class="actions">
-                    <a href="accept" class="btn accept">Accept Changes</a>
-                    <a href="reject" class="btn reject">Reject</a>
+        warning_html = ""
+        if warning:
+            warning_html = '<span style="color: #e5bf38; font-size: 0.9rem; margin-right: 12px; font-weight: bold;" title="File has unsaved changes. Diff might be based on stale content.">\u26A0 Unsaved Changes</span>'
+
+        return """
+        <body id="gemini-diff-toolbar" style="background-color: #1e1e1e; margin: 0; padding: 12px; border-top: 1px solid #333;">
+            <div style="display: flex; flex-direction: row; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <div style="display: flex; flex-direction: row; align-items: center;">
+                    <span style="font-weight: bold; color: #cccccc; font-size: 0.8rem; margin-right: 16px; text-transform: uppercase; letter-spacing: 0.5px;">GEMINI REVIEW</span>
+                    {}
+                    <a href="info" style="text-decoration: none; padding: 4px 10px; border-radius: 4px; color: #aaaaaa; background-color: #2d2d2d; font-size: 0.8rem; margin-right: 8px;">Info</a>
+                    {}
                 </div>
             </div>
+            <div style="display: flex; flex-direction: row; justify-content: flex-end; align-items: center;">
+                <a href="prev" style="text-decoration: none; padding: 6px 14px; border-radius: 4px; color: #ffffff; background-color: #007acc; font-size: 0.8rem; margin-left: 8px;">\u2190 Prev</a>
+                <a href="next" style="text-decoration: none; padding: 6px 14px; border-radius: 4px; color: #ffffff; background-color: #007acc; font-size: 0.8rem; margin-left: 8px;">Next \u2192</a>
+                <a href="accept" style="text-decoration: none; padding: 6px 14px; border-radius: 4px; color: #ffffff; background-color: #2ea043; font-weight: bold; font-size: 0.8rem; margin-left: 8px;">\u2713 Accept</a>
+                <a href="reject" style="text-decoration: none; padding: 6px 14px; border-radius: 4px; color: #ffffff; background-color: #da3633; font-size: 0.8rem; margin-left: 8px;">\u2715 Reject</a>
+            </div>
         </body>
-        """.format(
-            explanation=safe_explanation
-        )
+        """.format(warning_html, terminal_btn)
 
+    def _show_diff_panel(self, window, file_path, previous_panel=None, warning=False):
+        panel = window.create_output_panel("GeminiDiff")
+        panel.settings().set("gutter", False)
+        panel.settings().set("line_numbers", False)
+        
+        html = self._get_diff_toolbar_html(previous_panel, warning)
+        
+        panel.erase_phantoms("gemini_diff_panel")
+        panel.add_phantom(
+            "gemini_diff_panel",
+            sublime.Region(0, 0),
+            html,
+            sublime.LAYOUT_INLINE,
+            lambda href: self.handle_diff_action(file_path, href)
+        )
+        window.run_command("show_panel", {"panel": "output.GeminiDiff"})
+
+    def _add_diff_phantoms(self, view, file_path):
+        # We only use the output panel for controls now, so just clean up any old phantoms.
         view.erase_phantoms("gemini_diff_header")
         view.erase_phantoms("gemini_diff_footer")
 
-        view.add_phantom(
-            "gemini_diff_header",
-            sublime.Region(0, 0),
-            html,
-            sublime.LAYOUT_BLOCK,
-            lambda href: self.resolve_diff(file_path, href == "accept"),
-        )
+    def handle_diff_action(self, file_path, action):
+        if action.startswith("terminal:"):
+            panel_name = action.split(":", 1)[1]
+            sublime.active_window().run_command("show_panel", {"panel": panel_name})
+            return
 
-        footer_pt = last_change_pt if last_change_pt is not None else view.size()
-        if footer_pt > 100:
-            view.add_phantom(
-                "gemini_diff_footer",
-                sublime.Region(footer_pt, footer_pt),
-                html,
-                sublime.LAYOUT_BLOCK,
-                lambda href: self.resolve_diff(file_path, href == "accept"),
+        view = None
+        for v in sublime.active_window().views():
+            if v.file_name() == file_path or v.settings().get("gemini_diff_file") == file_path:
+                view = v
+                break
+
+        if not view:
+            return
+
+        if action == "info":
+            explanation = view.settings().get("gemini_diff_explanation", "No explanation provided.")
+            import html as html_module
+
+            safe_explanation = html_module.escape(explanation).replace("\n", "<br>")
+
+            popup_html = """
+            <body id="gemini-info">
+                <style>
+                    body {{ padding: 10px; font-size: 0.9em; line-height: 1.5; }}
+                    h3 {{ margin-top: 0; color: #a9b7c6; }}
+                </style>
+                <h3>Gemini Suggestion</h3>
+                <div>{}</div>
+            </body>
+            """.format(
+                safe_explanation
             )
 
+            view.show_popup(popup_html, max_width=600)
+
+        elif action == "next":
+            view.run_command("gemini_next_change")
+        elif action == "prev":
+            view.run_command("gemini_prev_change")
+        elif action == "accept":
+            self.resolve_diff(file_path, True)
+        elif action == "reject":
+            self.resolve_diff(file_path, False)
+
     def _open_diff_ui(self, file_path, new_content, explanation):
+        # Capture panel before any focus changes
+        window = self._get_target_window(file_path)
+        current_panel = window.active_panel()
+
         view = self._prepare_diff_view(file_path)
         if view.is_loading():
             sublime.set_timeout(lambda: self._open_diff_ui(file_path, new_content, explanation), 50)
             return
 
-        sublime.active_window().focus_view(view)
+        window.focus_view(view)
         original_content = view.substr(sublime.Region(0, view.size()))
+        is_dirty = view.is_dirty()
 
         if file_path in self.pending_diffs:
             self.pending_diffs[file_path]["original_content"] = original_content
+            self.pending_diffs[file_path]["previous_panel"] = current_panel
 
         view.set_reference_document(original_content)
         view.run_command("gemini_replace_content", {"text": new_content})
         view.settings().set("gemini_diff_file", file_path)
         view.settings().set("gemini_is_diff", True)
+        view.settings().set("gemini_diff_explanation", explanation)
 
-        last_change_pt = self._apply_diff_highlights(view, original_content, new_content)
-        self._add_diff_phantoms(view, file_path, explanation, last_change_pt)
+        self._apply_diff_highlights(view, original_content, new_content)
+        self._add_diff_phantoms(view, file_path)
+        self._show_diff_panel(window, file_path, current_panel, is_dirty)
 
-    def _accept_diff(self, view, file_path):
+    def _accept_diff(self, view, file_path, previous_panel=None):
         if not view:
             return {
                 "msg": None,
                 "result": {"status": "rejected", "error": "View not found during acceptance"},
             }
+        
+        if view.window():
+            view.window().run_command("hide_panel", {"panel": "output.GeminiDiff"})
+            if previous_panel:
+                view.window().run_command("show_panel", {"panel": previous_panel})
 
         final_content = view.substr(sublime.Region(0, view.size()))
         view.erase_regions("gemini_changes")
         view.erase_phantoms("gemini_diff_header")
         view.erase_phantoms("gemini_diff_footer")
+        view.erase_phantoms("gemini_diff_deleted")
         view.settings().erase("gemini_diff_file")
         view.settings().erase("gemini_is_diff")
-        view.set_reference_document("")
-        sublime.status_message("Gemini: Changes accepted.")
+        view.settings().erase("gemini_diff_explanation")
+        view.set_reference_document(final_content)
+        
+        view.run_command("save")
+        sublime.status_message("Gemini: Changes accepted and saved.")
 
         return {
             "msg": {
@@ -423,17 +547,24 @@ class GeminiDelegate:
             "result": {"status": "accepted", "content": final_content},
         }
 
-    def _reject_diff(self, view, file_path, original_content):
+    def _reject_diff(self, view, file_path, original_content, previous_panel=None):
         if view and view.is_valid() and original_content is not None:
+            if view.window():
+                view.window().run_command("hide_panel", {"panel": "output.GeminiDiff"})
+                if previous_panel:
+                    view.window().run_command("show_panel", {"panel": previous_panel})
+
             view.run_command("gemini_replace_content", {"text": original_content})
             view.erase_regions("gemini_changes")
             view.erase_phantoms("gemini_diff_header")
             view.erase_phantoms("gemini_diff_footer")
+            view.erase_phantoms("gemini_diff_deleted")
             view.settings().erase("gemini_diff_file")
             view.settings().erase("gemini_is_diff")
-            view.set_reference_document("")
+            view.settings().erase("gemini_diff_explanation")
+            view.set_reference_document(original_content)
+            # Removed force save to respect original dirty state
             sublime.status_message("Gemini: Changes rejected.")
-
         return {
             "msg": {
                 "jsonrpc": "2.0",
@@ -458,11 +589,12 @@ class GeminiDelegate:
                 req["original_content"],
             )
             blocking = req.get("blocking", False)
+            previous_panel = req.get("previous_panel")
 
             outcome = (
-                self._accept_diff(view, file_path)
+                self._accept_diff(view, file_path, previous_panel)
                 if accepted
-                else self._reject_diff(view, file_path, original_content)
+                else self._reject_diff(view, file_path, original_content, previous_panel)
             )
 
             if session_id in server.sessions:
