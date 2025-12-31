@@ -328,38 +328,43 @@ class GeminiChatCommand(sublime_plugin.WindowCommand):
 
         self.window.focus_view(terminus_view)
         if instruction:
-            if is_new:
-                # Wait for the new CLI instance to connect to the MCP server
-                self.wait_for_new_session_and_send(instruction, initial_sessions)
+            # If new or still initializing, we wait.
+            if is_new or terminus_view.settings().get("gemini_initializing", False):
+                sublime.status_message("Gemini: Waiting for CLI to start...")
+                self.wait_for_new_session_and_send(instruction, initial_sessions, terminus_view)
             else:
                 self.send_instruction(instruction)
 
-    def wait_for_new_session_and_send(self, instruction, initial_sessions, attempt=0):
+    def wait_for_new_session_and_send(self, instruction, initial_sessions, view, attempt=0):
         if not server:
             self.send_instruction(instruction)
+            view.settings().erase("gemini_initializing")
             return
 
         current_sessions = set(server.sessions.keys())
         # Check if a new session has appeared
         if len(current_sessions) > len(initial_sessions) and (current_sessions - initial_sessions):
             # New session detected! Give it a moment to settle (REPL initialization)
+            view.settings().erase("gemini_initializing")
             sublime.set_timeout(lambda: self.send_instruction(instruction), 1000)
         elif attempt < 40:  # Poll for ~20 seconds (40 * 500ms)
             sublime.set_timeout(
                 lambda: self.wait_for_new_session_and_send(
-                    instruction, initial_sessions, attempt + 1
+                    instruction, initial_sessions, view, attempt + 1
                 ),
                 500,
             )
         else:
             # Timeout waiting for connection, try sending anyway
             print("[Gemini] Timeout waiting for MCP connection, sending instruction blindly.")
+            view.settings().erase("gemini_initializing")
             self.send_instruction(instruction)
 
     def send_instruction(self, instruction):
         self.window.run_command(
             "terminus_send_string", {"string": instruction + "\n", "tag": "gemini_cli"}
         )
+        sublime.status_message("Gemini: Instruction sent.")
 
     def description(self, instruction=None, location=None):
         return "Gemini Chat: {}".format(instruction) if instruction else "Gemini Chat"
@@ -553,6 +558,9 @@ class GeminiChatCommand(sublime_plugin.WindowCommand):
 
         self._prepare_view_location(location)
         target_view = self._create_terminus_view(location, panel_name, title, tag)
+
+        if target_view:
+            target_view.settings().set("gemini_initializing", True)
 
         if target_view and current_port:
             target_view.settings().set("gemini_server_port", current_port)
