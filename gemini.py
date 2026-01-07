@@ -18,9 +18,11 @@ except Exception:
     import gemini_server
 
 # --- Global State ---
-server, discovery_file_path, settings_file_path = None, None, None
+servers = {}  # window_id -> server_instance
+discovery_files = {}  # window_id -> file_path
+settings_files = {}  # window_id -> file_path
 last_active_views = {}  # window_id -> view_id
-last_context_hash = None
+last_context_hash = {}  # window_id -> hash
 
 
 # --- Helpers ---
@@ -45,7 +47,24 @@ def get_project_roots(window):
             if not os.path.isabs(p) and window.extract_variables().get("project_path"):
                 p = os.path.join(window.extract_variables()["project_path"], p)
             roots.append(os.path.abspath(p))
+
     v = window.active_view()
+    # If active view is Terminus or None, try fallback to last active code view
+    if not v or v.settings().get("terminus_view.tag"):
+        last_id = last_active_views.get(window.id())
+        if last_id:
+            for view in window.views():
+                if view.id() == last_id:
+                    v = view
+                    break
+
+        # If still no valid v, try first non-terminus view
+        if (not v or v.settings().get("terminus_view.tag")) and window.views():
+            for view in window.views():
+                if not view.settings().get("terminus_view.tag") and view.file_name():
+                    v = view
+                    break
+
     if v and v.file_name():
         path = os.path.abspath(os.path.dirname(v.file_name()))
         curr = path
@@ -90,38 +109,7 @@ def get_target_region(view):
         return None
 
 
-def format_context_string(view, target, roots):
-    fname = view.file_name() or "Untitled"
-    for r in roots:
-        if fname.startswith(r):
-            try:
-                fname = os.path.relpath(fname, r)
-                break
-            except ValueError:
-                pass
-
-    rc_start = view.rowcol(target.begin())
-    rc_end = view.rowcol(target.end())
-    l_start, l_end = rc_start[0] + 1, rc_end[0] + 1
-    l_info = "Line {}".format(l_start) if l_start == l_end else "Lines {}-{}".format(l_start, l_end)
-
-    symbol = get_symbol_at_point(view, target.begin())
-    sym_info = ' inside "{}"'.format(symbol) if symbol else ""
-
-    return "(Context: file='{}', {} {})".format(fname, l_info, sym_info)
-
-
-def get_selection_metadata(view, roots):
-    if not view:
-        return ""
-    target = get_target_region(view)
-    if not target:
-        return ""
-    return format_context_string(view, target, roots)
-
-
-def push_notification(method, params):
-    global server
+def push_notification(server, method, params):
     if not server:
         return
     msg = {"jsonrpc": "2.0", "method": method, "params": params}
@@ -145,6 +133,13 @@ def push_notification(method, params):
 
 def push_context_update(window, force=False):
     if not window:
+        return
+
+    wid = window.id()
+    server = servers.get(wid)
+    if not server:
+        # If no server for this window, maybe we should start one?
+        # Or just return. Typically server is started on load/activation.
         return
 
     roots = get_project_roots(window)
@@ -189,6 +184,12 @@ def push_context_update(window, force=False):
     if active_view and active_view.settings().get("terminus_view.tag"):
         return
 
+    # "Strict Mode": If the user has explicitly added folders (a Project), we limit context
+    # to files within those roots to prevent pollution from unrelated files.
+    # "Loose Mode": If no folders are open, we treat the window as a scratchpad and
+    # include all open files.
+    has_project_folders = len(window.folders()) > 0
+
     for view in window.views():
         fname = view.file_name()
         if not fname or not os.path.exists(fname):
@@ -209,7 +210,12 @@ def push_context_update(window, force=False):
                 is_in_project = True
                 break
 
-        if not is_in_project and not is_active:
+        # Filter logic:
+        # - Always include active file.
+        # - Always include files inside project roots.
+        # - If NOT in a project (no folders), include everything (Loose Mode).
+        # - If IN a project, exclude external files (Strict Mode).
+        if not is_active and not is_in_project and has_project_folders:
             continue
 
         sel = view.sel()
@@ -254,7 +260,6 @@ def push_context_update(window, force=False):
     params = {"workspaceState": {"openFiles": open_files, "isTrusted": True}}
 
     # Deduplicate updates
-    global last_context_hash
     try:
         # Exclude timestamp from hash so that mere time passing doesn't trigger an update
         # if the actual state (active file, cursor, selection) hasn't changed.
@@ -264,19 +269,30 @@ def push_context_update(window, force=False):
         current_hash = hashlib.md5(
             json.dumps(params_for_hashing, sort_keys=True).encode("utf-8")
         ).hexdigest()
-        if last_context_hash == current_hash and not force:
+
+        last_hash = last_context_hash.get(wid)
+        if last_hash == current_hash and not force:
             return
-        last_context_hash = current_hash
+        last_context_hash[wid] = current_hash
     except Exception:
         pass
 
-    push_notification("ide/contextUpdate", params)
+    push_notification(server, "ide/contextUpdate", params)
 
 
-def write_settings_file():
-    global settings_file_path
-    if settings_file_path and os.path.exists(settings_file_path):
-        return settings_file_path
+def write_settings_file(window=None):
+    if not window:
+        window = sublime.active_window()
+    if not window:
+        return None
+
+    wid = window.id()
+    if wid in settings_files and os.path.exists(settings_files[wid]):
+        return settings_files[wid]
+
+    server = servers.get(wid)
+    if not server:
+        return None
 
     settings_dir = os.path.join(tempfile.gettempdir(), "gemini", "settings")
     if not os.path.exists(settings_dir):
@@ -285,14 +301,10 @@ def write_settings_file():
         except Exception:
             pass
 
-    settings_file_path = os.path.join(
-        settings_dir, "gemini-ide-settings-{}.json".format(os.getpid())
+    settings_path = os.path.join(
+        settings_dir, "gemini-ide-settings-{}-{}.json".format(os.getpid(), wid)
     )
     try:
-        # We only need to enable IDE mode.
-        # The connection details are passed via environment variables (GEMINI_CLI_IDE_SERVER_PORT),
-        # which the CLI's internal IdeClient uses to auto-discover and connect.
-        # We also register it as an MCP server so general tools (navigateTo) are visible.
         config = {
             "ide": {"enabled": True},
             "mcpServers": {
@@ -304,9 +316,11 @@ def write_settings_file():
             },
         }
 
-        with open(settings_file_path, "w") as f:
+        with open(settings_path, "w") as f:
             json.dump(config, f)
-        return settings_file_path
+
+        settings_files[wid] = settings_path
+        return settings_path
     except Exception:
         return None
 
@@ -422,6 +436,8 @@ class GeminiChatCommand(sublime_plugin.WindowCommand):
             instruction += "\n\n```\n" + context_text + "\n```"
 
         # Snapshot active sessions before launch to detect new connection
+        ensure_server_for_window(self.window)
+        server = servers.get(self.window.id())
         initial_sessions = set(server.sessions.keys()) if server else set()
 
         terminus_view, is_new = self.ensure_terminus_open(location)
@@ -438,6 +454,7 @@ class GeminiChatCommand(sublime_plugin.WindowCommand):
                 self.send_instruction(instruction)
 
     def wait_for_new_session_and_send(self, instruction, initial_sessions, view, attempt=0):
+        server = servers.get(self.window.id())
         if not server:
             self.send_instruction(instruction)
             view.settings().erase("gemini_initializing")
@@ -472,7 +489,7 @@ class GeminiChatCommand(sublime_plugin.WindowCommand):
     def description(self, instruction=None, location=None):
         return "Gemini Chat: {}".format(instruction) if instruction else "Gemini Chat"
 
-    def get_terminus_env(self, roots, cmd_args):
+    def get_terminus_env(self, window, roots, cmd_args):
         env = {
             "TERM": "xterm-256color",
             "COLORTERM": "truecolor",
@@ -482,15 +499,26 @@ class GeminiChatCommand(sublime_plugin.WindowCommand):
             "TERM_PROGRAM": "vscode",
         }
 
-        # Load user-defined environment variables
+        # Load global user-defined environment variables
         user_env = sublime.load_settings("Gemini.sublime-settings").get("environment", {})
         if user_env:
             env.update(user_env)
 
-        settings_path = write_settings_file()
+        # Load project-specific overrides
+        if window:
+            project_data = window.project_data()
+            if project_data and "settings" in project_data:
+                project_settings = project_data["settings"]
+                if "Gemini" in project_settings:
+                    project_env = project_settings["Gemini"].get("environment", {})
+                    if project_env:
+                        env.update(project_env)
+
+        settings_path = write_settings_file(window)
         if settings_path:
             env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"] = settings_path
 
+        server = servers.get(window.id())
         if server:
             if roots:
                 env["GEMINI_CLI_IDE_WORKSPACE_PATH"] = os.pathsep.join(roots)
@@ -543,7 +571,7 @@ class GeminiChatCommand(sublime_plugin.WindowCommand):
             cmd_args.extend(["--include-directories", r])
         cwd = roots[0] if roots else os.path.expanduser("~")
 
-        env = self.get_terminus_env(roots, cmd_args)
+        env = self.get_terminus_env(self.window, roots, cmd_args)
         cmd_args = self.get_shell_cmd(cmd_args)
 
         print("[Gemini] Launching Terminus with env:", env)
@@ -574,7 +602,8 @@ class GeminiChatCommand(sublime_plugin.WindowCommand):
         return view
 
     def ensure_terminus_open(self, location=None):
-        global server
+        ensure_server_for_window(self.window)
+        server = servers.get(self.window.id())
         current_port = server.server_address[1] if server else None
         settings = sublime.load_settings("Gemini.sublime-settings")
         current_roots = get_project_roots(self.window)
@@ -671,6 +700,10 @@ class GeminiChatCommand(sublime_plugin.WindowCommand):
 
 class GeminiChatExternalCommand(sublime_plugin.WindowCommand):
     def run(self):
+        # Ensure server is running and discovery file is up to date
+        ensure_server_for_window(self.window)
+        write_discovery_file(self.window)
+
         roots = get_project_roots(self.window)
         gemini_path = get_gemini_path()
 
@@ -821,15 +854,24 @@ class GeminiStopCommand(sublime_plugin.WindowCommand):
 class GeminiDebugEnvCommand(sublime_plugin.WindowCommand):
     def run(self):
         env = {"TERM": "xterm-256color", "TERM_PROGRAM": "vscode"}
-        global server
 
-        # Load user-defined environment variables
+        # Load global user-defined environment variables
         user_env = sublime.load_settings("Gemini.sublime-settings").get("environment", {})
         if user_env:
             env.update(user_env)
 
+        # Load project-specific overrides
+        if self.window:
+            project_data = self.window.project_data()
+            if project_data and "settings" in project_data:
+                project_settings = project_data["settings"]
+                if "Gemini" in project_settings:
+                    project_env = project_settings["Gemini"].get("environment", {})
+                    if project_env:
+                        env.update(project_env)
+
         # Ensure IDE mode is enabled by injecting a system settings file
-        settings_path = write_settings_file()
+        settings_path = write_settings_file(self.window)
         if settings_path:
             env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"] = settings_path
 
@@ -842,56 +884,6 @@ class GeminiDebugEnvCommand(sublime_plugin.WindowCommand):
                 "auto_close": False,
                 "env": env,
             },
-        )
-
-
-class GeminiInsertContextCommand(sublime_plugin.WindowCommand):
-    def _find_terminal_view(self, tag):
-        for v in self.window.views():
-            if v.settings().get("terminus_view.tag") == tag:
-                return v, False
-
-        panel_view = self.window.find_output_panel("Gemini CLI")
-        if panel_view:
-            return panel_view, True
-        return None, False
-
-    def _find_source_view(self, terminus_view, is_panel):
-        code_view = self.window.active_view()
-        if code_view and terminus_view and not is_panel and code_view.id() == terminus_view.id():
-            code_view = self.window.active_view_in_group(0)
-            if code_view and code_view.id() == terminus_view.id():
-                code_view = self.window.active_view_in_group(1)
-
-            if not code_view or code_view.id() == terminus_view.id():
-                code_view = None
-                for v in self.window.views():
-                    if v.id() != terminus_view.id() and v.file_name():
-                        code_view = v
-                        break
-        return code_view
-
-    def run(self):
-        tag = "gemini_cli"
-        terminus_view, is_panel = self._find_terminal_view(tag)
-        code_view = self._find_source_view(terminus_view, is_panel)
-
-        if not code_view:
-            return
-
-        roots = get_project_roots(self.window)
-        context_str = get_selection_metadata(code_view, roots)
-        if not context_str:
-            return
-
-        if is_panel:
-            self.window.run_command("show_panel", {"panel": "output.Gemini CLI"})
-            self.window.focus_view(terminus_view)
-        elif terminus_view:
-            self.window.focus_view(terminus_view)
-
-        self.window.run_command(
-            "terminus_send_string", {"string": " " + context_str + " ", "tag": tag}
         )
 
 
@@ -952,82 +944,86 @@ class GeminiReplaceContentCommand(sublime_plugin.TextCommand):
 
 
 # --- Server ---
-def start_server_async():
-    global server
-    try:
-        if server:
-            print("[Gemini] Server already running on port", server.server_address[1])
-            return
+def ensure_server_for_window(window):
+    if not window:
+        return None
 
+    wid = window.id()
+    if wid in servers:
+        return servers[wid]
+
+    try:
         token = str(uuid.uuid4())
-        delegate = gemini_server.GeminiDelegate()
+        delegate = gemini_server.GeminiDelegate(window)
         # Trigger context update when tools are listed (client is ready)
         delegate.on_tools_list = lambda: sublime.set_timeout_async(
-            lambda: push_context_update(sublime.active_window(), force=True), 1000
+            lambda: push_context_update(window, force=True), 1000
         )
 
-        # Sticky port logic
-        pid = os.getppid()
-        ide_dir = os.path.join(tempfile.gettempdir(), "gemini", "ide")
-        if not os.path.exists(ide_dir):
-            try:
-                os.makedirs(ide_dir)
-            except Exception:
-                pass
-
-        sticky_port_file = os.path.join(ide_dir, "gemini-port-{}.txt".format(pid))
-        port = 0
-
-        if os.path.exists(sticky_port_file):
-            try:
-                with open(sticky_port_file, "r") as f:
-                    port = int(f.read().strip())
-            except Exception:
-                pass
-
-        try:
-            server = gemini_server.MCPServer(
-                ("127.0.0.1", port), gemini_server.MCPServerHandler, token, delegate
-            )
-        except OSError:
-            if port != 0:
-                print(
-                    "[Gemini] Could not bind to sticky port {}, falling back to random".format(port)
-                )
-                server = gemini_server.MCPServer(
-                    ("127.0.0.1", 0), gemini_server.MCPServerHandler, token, delegate
-                )
-            else:
-                raise
+        # Bind to ephemeral port
+        server = gemini_server.MCPServer(
+            ("127.0.0.1", 0), gemini_server.MCPServerHandler, token, delegate
+        )
 
         actual_port = server.server_address[1]
-
-        # Save sticky port
-        try:
-            with open(sticky_port_file, "w") as f:
-                f.write(str(actual_port))
-        except Exception:
-            pass
+        servers[wid] = server
 
         threading.Thread(target=server.serve_forever, daemon=True).start()
 
-        print("[Gemini] Server started on port " + str(actual_port))
-        sublime.set_timeout(lambda: write_settings_file(), 50)
-        sublime.set_timeout(lambda: write_discovery_file(sublime.active_window()), 100)
+        print(f"[Gemini] Server started for window {wid} on port {actual_port}")
+
+        # Immediate setup
+        sublime.set_timeout(lambda: write_settings_file(window), 50)
+        sublime.set_timeout(lambda: write_discovery_file(window), 100)
+
+        return server
     except Exception as e:
-        print("[Gemini] Failed to start server:", e)
+        print(f"[Gemini] Failed to start server for window {wid}: {e}")
+        return None
+
+
+def stop_server_for_window(window_id):
+    if window_id in servers:
+        s = servers[window_id]
+        print(f"[Gemini] Stopping server for window {window_id} on port {s.server_address[1]}")
+        s.shutdown_flag = True
+
+        def stop():
+            try:
+                s.shutdown()
+                s.server_close()
+            except Exception:
+                pass
+
+        threading.Thread(target=stop).start()
+        del servers[window_id]
+
+    if window_id in discovery_files and os.path.exists(discovery_files[window_id]):
+        try:
+            os.remove(discovery_files[window_id])
+        except Exception:
+            pass
+        del discovery_files[window_id]
+
+    if window_id in settings_files and os.path.exists(settings_files[window_id]):
+        try:
+            os.remove(settings_files[window_id])
+        except Exception:
+            pass
+        del settings_files[window_id]
 
 
 def write_discovery_file(window):
-    global discovery_file_path
-    if not window or not server:
+    if not window:
+        return
+
+    wid = window.id()
+    server = servers.get(wid)
+    if not server:
         return
 
     # Write discovery files for both parent (plugin_host) and grandparent (Sublime Text)
-    # to ensure gemini-cli can find it regardless of how it traverses the tree.
     pids = {os.getpid(), os.getppid()}
-
-    # Try to find the grandparent PID as well (Sublime Text main process)
     try:
         import subprocess
 
@@ -1041,40 +1037,24 @@ def write_discovery_file(window):
         pass
 
     discovery_dir = os.path.join(tempfile.gettempdir(), "gemini", "ide")
-
-    # Clean up OLD discovery files for these PIDs
-    if os.path.exists(discovery_dir):
-        for f in os.listdir(discovery_dir):
-            if f.endswith(".json"):
-                # Check if file belongs to one of our PIDs
-                if f.startswith("gemini-ide-server-"):
-                    parts = f.split("-")
-                    # parts: ['gemini', 'ide', 'server', 'PID', 'PORT.json']
-                    if len(parts) >= 4 and parts[3].isdigit() and int(parts[3]) in pids:
-                        try:
-                            os.remove(os.path.join(discovery_dir, f))
-                        except Exception:
-                            pass
-    else:
+    if not os.path.exists(discovery_dir):
         try:
             os.makedirs(discovery_dir)
         except Exception:
             pass
 
+    # Clean up OLD discovery files for this window if port changed (unlikely) or just overwrite?
+    # We rely on unique filename per window.
+
     roots = get_project_roots(window)
-    if not roots:
-        # Don't write discovery file if we don't have a valid workspace context yet.
-        # This prevents the CLI from seeing a mismatched (temp dir) workspace.
-        # And we already cleaned up, so no stale file remains.
-        return
+    # Allow writing even if no roots (fallback to empty or home) for "No Project" support
+    ws = os.pathsep.join(roots) if roots else os.path.expanduser("~")
 
     port, token = server.server_address[1], server.auth_token
-    ws = os.pathsep.join(roots)
 
     for pid in pids:
-        discovery_file_path = os.path.join(
-            discovery_dir, "gemini-ide-server-{}-{}.json".format(pid, port)
-        )
+        # Use Window ID in filename to avoid collisions between windows
+        fpath = os.path.join(discovery_dir, "gemini-ide-server-{}-{}.json".format(pid, wid))
         info = {
             "port": port,
             "workspacePath": ws,
@@ -1082,29 +1062,26 @@ def write_discovery_file(window):
             "ideInfo": {"name": "sublime_text", "displayName": "Sublime Text"},
         }
         try:
-            with open(discovery_file_path, "w") as f:
+            with open(fpath, "w") as f:
                 json.dump(info, f)
+            # Update timestamp to ensure this window is preferred by external terminals
+            os.utime(fpath, None)
+
+            # Track it (maybe just the primary PID one)
+            if pid == os.getpid():
+                discovery_files[wid] = fpath
         except Exception:
             pass
 
 
 def plugin_loaded():
     # Small delay to ensure Sublime is ready
-    sublime.set_timeout(lambda: threading.Thread(target=start_server_async).start(), 1000)
+    sublime.set_timeout(lambda: ensure_server_for_window(sublime.active_window()), 1000)
 
 
 def plugin_unloaded():
-    global server, settings_file_path
-    if server:
-        s = server
-        server = None
-        s.shutdown_flag = True
-
-        def stop_server():
-            s.shutdown()
-            s.server_close()
-
-        threading.Thread(target=stop_server).start()
+    for wid in list(servers.keys()):
+        stop_server_for_window(wid)
 
     # Clean up discovery files for this process and parent
     discovery_dir = os.path.join(tempfile.gettempdir(), "gemini", "ide")
@@ -1113,14 +1090,13 @@ def plugin_unloaded():
         for f in os.listdir(discovery_dir):
             if f.startswith("gemini-ide-server-") and f.endswith(".json"):
                 parts = f.split("-")
-                if len(parts) >= 4 and int(parts[3]) in pids:
+                # Filename format: gemini-ide-server-{PID}-{WINDOW_ID}.json
+                # Check if PID part matches
+                if len(parts) >= 4 and parts[3].isdigit() and int(parts[3]) in pids:
                     try:
                         os.remove(os.path.join(discovery_dir, f))
                     except Exception:
                         pass
-
-    if settings_file_path and os.path.exists(settings_file_path):
-        os.remove(settings_file_path)
 
 
 class GeminiEventListener(sublime_plugin.EventListener):
@@ -1173,14 +1149,19 @@ class GeminiEventListener(sublime_plugin.EventListener):
         # Ignore terminal views and widget views (console input, search panels, etc.)
         if view.settings().get("terminus_view.tag") or view.settings().get("is_widget"):
             return
-        if view.window():
+        window = view.window()
+        if window:
             # Track last active code view
             if not view.settings().get("terminus_view.tag"):
-                last_active_views[view.window().id()] = view.id()
+                last_active_views[window.id()] = view.id()
 
-            # Move heavy write_discovery_file to async
-            sublime.set_timeout_async(lambda: write_discovery_file(view.window()), 0)
-            self.schedule_update(view.window())
+            # Ensure server exists for this window
+            sublime.set_timeout_async(lambda: ensure_server_for_window(window), 0)
+            self.schedule_update(window)
+
+    def on_pre_close_window(self, window):
+        if window:
+            stop_server_for_window(window.id())
 
     def on_selection_modified(self, view):
         # Ignore terminal views and widget views
@@ -1192,10 +1173,20 @@ class GeminiEventListener(sublime_plugin.EventListener):
     def on_close(self, view):
         # Check if the closed view was a diff view
         diff_file = view.settings().get("gemini_diff_file")
-        if diff_file and server and hasattr(server, "delegate"):
-            # Resolve as rejected (false) if it wasn't explicitly accepted.
-            # The resolve_diff method handles the logic to ensure we don't double-resolve.
-            server.delegate.resolve_diff(diff_file, False)
+        if diff_file:
+            window = view.window()
+            if window:
+                server = servers.get(window.id())
+                if server and hasattr(server, "delegate"):
+                    # Resolve as rejected (false) if it wasn't explicitly accepted.
+                    server.delegate.resolve_diff(diff_file, False)
+            else:
+                # If window is gone, maybe just iterate all servers?
+                # But resolve_diff relies on finding the view, which is closed.
+                # Actually, resolve_diff checks pending_diffs.
+                for s in servers.values():
+                    if s.delegate:
+                        s.delegate.resolve_diff(diff_file, False)
 
 
 class GeminiAcceptDiffCommand(sublime_plugin.TextCommand):
@@ -1204,7 +1195,9 @@ class GeminiAcceptDiffCommand(sublime_plugin.TextCommand):
         if not diff_file:
             return
 
-        global server
+        window = self.view.window()
+        server = servers.get(window.id()) if window else None
+
         if server and hasattr(server, "delegate"):
             server.delegate.resolve_diff(diff_file, True)
         else:
@@ -1226,7 +1219,9 @@ class GeminiRejectDiffCommand(sublime_plugin.TextCommand):
         if not diff_file:
             return
 
-        global server
+        window = self.view.window()
+        server = servers.get(window.id()) if window else None
+
         if server and hasattr(server, "delegate"):
             server.delegate.resolve_diff(diff_file, False)
         else:

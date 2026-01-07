@@ -224,7 +224,8 @@ class MCPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 class GeminiDelegate:
-    def __init__(self):
+    def __init__(self, window=None):
+        self.window = window
         self.pending_diffs = {}
         self.on_tools_list = None
 
@@ -330,7 +331,7 @@ class GeminiDelegate:
         }
 
     def _navigate_ui(self, path, line, col):
-        window = sublime.active_window()
+        window = self.window or sublime.active_window()
         window.open_file("{}:{}:{}".format(path, line, col), sublime.ENCODED_POSITION)
 
     def handle_open_diff(self, msg_id, args, session_id, server):
@@ -371,6 +372,9 @@ class GeminiDelegate:
         }
 
     def _get_target_window(self, file_path=None):
+        if self.window and self.window.is_valid():
+            return self.window
+
         # 1. If file_path is provided, try to find a window that has this file open
         if file_path:
             for w in sublime.windows():
@@ -397,7 +401,7 @@ class GeminiDelegate:
         return sublime.active_window()
 
     def _prepare_diff_view(self, file_path):
-        window = sublime.active_window()
+        window = self.window or sublime.active_window()
         view = window.find_open_file(file_path)
         if not view:
             view = window.open_file(file_path)
@@ -528,13 +532,14 @@ class GeminiDelegate:
         view.erase_phantoms("gemini_diff_footer")
 
     def handle_diff_action(self, file_path, action):
+        window = self.window or sublime.active_window()
         if action.startswith("terminal:"):
             panel_name = action.split(":", 1)[1]
-            sublime.active_window().run_command("show_panel", {"panel": panel_name})
+            window.run_command("show_panel", {"panel": panel_name})
             return
 
         view = None
-        for v in sublime.active_window().views():
+        for v in window.views():
             if v.file_name() == file_path or v.settings().get("gemini_diff_file") == file_path:
                 view = v
                 break
@@ -760,8 +765,9 @@ class GeminiDelegate:
         }
 
     def resolve_diff(self, file_path, accepted):
+        window = self.window or sublime.active_window()
         view = None
-        for v in sublime.active_window().views():
+        for v in window.views():
             if v.file_name() == file_path or v.settings().get("gemini_diff_file") == file_path:
                 view = v
                 break

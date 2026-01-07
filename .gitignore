@@ -6,3 +6,4 @@ __pycache__/
 gemini-ide-server-*.json
 *.sublime-workspace
 gemini-cli/
+**/node_modules/

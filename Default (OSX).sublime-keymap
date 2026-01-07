@@ -2,9 +2,5 @@
     {
         "keys": ["super+shift+g"],
         "command": "gemini_chat"
-    },
-    {
-        "keys": ["super+shift+i"],
-        "command": "gemini_insert_context"
     }
 ]

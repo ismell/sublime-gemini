@@ -30,7 +30,6 @@ Sublime Text integration for the [Gemini CLI](https://github.com/google-gemini/g
 ## Usage
 
 - **Chat**: Press `Cmd+Shift+G` (macOS) or `Ctrl+Shift+G` (Windows/Linux) to open the Gemini Console.
-- **Insert Context**: Press `Cmd+Shift+I` (macOS) or `Ctrl+Shift+I` (Windows/Linux) while the Gemini Console is open to insert details about your current selection (file, lines, symbol) into the prompt.
 - **Refactor**: Select code, Right Click > **Gemini** > **Inline Edit / Refactor**.
 - **Stop Generation**: Open the Command Palette and select **Gemini: Stop Generation** to interrupt Gemini (sends Ctrl+C).
 - **Commands**: Open Command Palette (`Cmd+Shift+P`) and type `Gemini`.
@@ -38,11 +37,26 @@ Sublime Text integration for the [Gemini CLI](https://github.com/google-gemini/g
 
 ## How it Works: IDE Integration & Auth
 
-Sublime Gemini runs a local MCP (Model Context Protocol) server. When you launch the chat, it uses a few tricks to ensure a seamless connection:
+Sublime Gemini runs a local MCP (Model Context Protocol) server **per window**. When you launch the chat, it uses a few tricks to ensure a seamless connection:
 
-1.  **Discovery**: It writes discovery files in your system's temporary directory containing the server's port and a unique authentication token.
+1.  **Discovery**: It writes discovery files in your system's temporary directory containing the server's port and a unique authentication token for each window.
 2.  **Pre-Authorization**: The plugin injects a temporary configuration into the Gemini CLI that whitelists IDE-specific tools, bypassing repetitive permission prompts.
 3.  **Dynamic Launcher**: To handle terminal session restoration (where environment variables might be stale), the plugin uses a cross-platform Node.js launcher script. This script dynamically looks up the latest server credentials every time you run the CLI, ensuring a reliable connection even after restarting Sublime.
+
+## Project & Context Awareness
+
+The plugin is designed to be mindful of your privacy and project boundaries:
+
+- **Window Isolation**: Each Sublime Text window is treated as a separate "IDE instance" with its own isolated Gemini session. Chat history and file context from one window never leak into another.
+- **Project Roots**: Gemini CLI's visibility is limited to your current Sublime Text project. It identifies project roots using (in order):
+    1.  Explicitly open folders in the sidebar.
+    2.  Folders defined in your `.sublime-project` file.
+    3.  The nearest parent directory containing a `.git` folder (if no folders are explicitly open).
+    4.  The directory of the currently active file (as a fallback).
+- **Visibility Limits**: To maintain performance and relevance, only the **10 most recently active files** within these project roots are shared as context.
+- **Active File Priority**: The currently active file is always included in the context, even if it is outside of the identified project roots, ensuring Gemini can always see what you are currently working on.
+- **Automatic Updates**: Context (cursor position, selections, and open files) is updated automatically as you work, allowing for seamless transitions between files.
+- **External Terminals**: When launching the Gemini CLI from an external terminal, it will automatically connect to the window it was launched from. This "sticky" connection ensures that your terminal session stays synchronized with the correct project context even if you switch focus between windows.
 
 ## Configuration
 
@@ -54,6 +68,24 @@ Settings are available in `Preferences > Package Settings > Gemini`.
     "view_location": "split", // Where to open chat: "split" (default), "tab", "panel"
     "environment": {
         "GOOGLE_CLOUD_PROJECT": "your-project-id"
+    }
+}
+```
+
+### Project-Specific Overrides
+
+You can override environment variables on a per-project basis by adding them to your `.sublime-project` file. This is useful for project-specific API keys or GCP configurations.
+
+```json
+{
+    "folders": [...],
+    "settings": {
+        "Gemini": {
+            "environment": {
+                "GOOGLE_API_KEY": "your-project-specific-key",
+                "GOOGLE_CLOUD_PROJECT": "another-project-id"
+            }
+        }
     }
 }
 ```
