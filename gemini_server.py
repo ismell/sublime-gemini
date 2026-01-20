@@ -258,6 +258,13 @@ class GeminiDelegate:
         elif method == "initialize":
             return self._handle_initialize(msg_id)
 
+        elif method == "notifications/initialized":
+            # Client ready, nothing to return
+            return None
+
+        elif method == "ping":
+            return {"jsonrpc": "2.0", "id": msg_id, "result": {}}
+
         return self.error_response(msg_id, -32601, "Method not found")
 
     def _list_tools(self, msg_id):
